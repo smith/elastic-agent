@@ -575,6 +575,16 @@ collectors:
       connectors:
         # [Elastic APM Connector](https://github.com/elastic/opentelemetry-collector-components/tree/main/connector/elasticapmconnector)
         elasticapm: {}
+        # [Routing Connector](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/connector/routingconnector)
+        # Sends kubeletstats metrics to the ECS pipeline; everything else, including
+        # hostmetrics, falls through to the default OTel pipeline.
+        routing:
+          default_pipelines: [metrics/otel]
+          error_mode: ignore
+          table:
+            - context: metric
+              statement: route() where instrumentation_scope.name == "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kubeletstatsreceiver"
+              pipelines: [metrics/k8s/ecs]
       receivers:
         otlp:
           protocols:
@@ -594,6 +604,27 @@ collectors:
         # [Elastic APM Processor](https://github.com/elastic/opentelemetry-collector-components/tree/main/processor/elasticapmprocessor)
         # The processor enriches traces with elastic specific requirements.
         elasticapm: {}
+        # [Elastic Infra Metrics Processor](https://github.com/elastic/opentelemetry-collector-components/tree/main/processor/elasticinframetricsprocessor)
+        # Translates OTel container/pod metrics into their ECS equivalents so they
+        # populate Kibana's Infrastructure UI. Host metrics are left to the native
+        # OTel pipeline, which already maps them to `system.*` datasets in 9.4.
+        elasticinframetrics:
+          add_system_metrics: false
+          add_k8s_metrics: true
+          drop_original: true
+        # The Infrastructure UI keys off `event.dataset`.
+        attributes/dataset:
+          actions:
+            - key: event.dataset
+              from_attribute: data_stream.dataset
+              action: upsert
+        # The exporter's `mapping::mode` option is ignored as of 9.4; ECS mapping is
+        # selected per-scope with this attribute instead.
+        transform/ecs_mapping_mode:
+          metric_statements:
+            - context: scope
+              statements:
+                - set(attributes["elastic.mapping.mode"], "ecs")
       exporters:
         debug: {}
         # [Elasticsearch exporter](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/exporter/elasticsearchexporter/README.md)
@@ -606,6 +637,13 @@ collectors:
           #   insecure_skip_verify: true
           mapping:
             mode: otel
+        # ECS-mapped sink for the metrics translated by `elasticinframetrics`.
+        # Mapping mode comes from the `elastic.mapping.mode` scope attribute set in
+        # the pipeline, not from exporter config.
+        elasticsearch/ecs:
+          endpoints:
+            - ${env:ELASTIC_ENDPOINT}
+          api_key: ${env:ELASTIC_API_KEY}
       extensions:
         cgroup_runtime: {}
         health_check:
@@ -613,8 +651,20 @@ collectors:
       service:
         extensions: [cgroup_runtime, health_check]
         pipelines:
+          # Split metrics by scope: kubeletstats goes to ECS, the rest stay OTel.
           metrics:
             receivers: [otlp]
+            exporters: [routing]
+          metrics/k8s/ecs:
+            receivers: [routing]
+            processors:
+              - elasticinframetrics
+              - attributes/dataset
+              - transform/ecs_mapping_mode
+              - batch/metrics
+            exporters: [debug, elasticsearch/ecs]
+          metrics/otel:
+            receivers: [routing]
             processors: [batch/metrics]
             exporters: [debug, elasticsearch/otel]
           logs:

@@ -612,11 +612,20 @@ collectors:
           add_system_metrics: false
           add_k8s_metrics: true
           drop_original: true
-        # The Infrastructure UI keys off `event.dataset`.
+        # NOTE: kubernetes.pod.network.{rx,tx}.bytes will read 0 (Infra UI shows "-")
+        # on clusters where kubelet's summary API doesn't populate per-pod network
+        # stats (only k8s.node.network.io), e.g. minikube's docker driver. This is a
+        # kubelet/CNI limitation, not a config issue; it reports correctly on
+        # clusters whose CNI exposes per-pod interface stats (kubeadm, EKS, GKE).
+        # The Infrastructure UI keys off `event.dataset`, and its pod inventory
+        # model filters on `event.module: kubernetes`.
         attributes/dataset:
           actions:
             - key: event.dataset
               from_attribute: data_stream.dataset
+              action: upsert
+            - key: event.module
+              value: kubernetes
               action: upsert
         # The exporter's `mapping::mode` option is ignored as of 9.4; ECS mapping is
         # selected per-scope with this attribute instead.
